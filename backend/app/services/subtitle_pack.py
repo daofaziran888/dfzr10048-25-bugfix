@@ -5,6 +5,7 @@ from typing import Any
 import hashlib
 
 from app.services.base import BaseModuleService
+from app.services.alignment_workflow import workflow
 from app.store import store
 
 
@@ -15,8 +16,35 @@ class SubtitlePackService(BaseModuleService):
     LIST_FIELDS = ["字幕包编号", "关联媒体源", "绑定版本", "字幕行数", "覆盖时长秒", "导出格式", "下载次数", "生成时间"]
     REQUIRED_FIELDS = ["字幕包编号", "关联媒体源", "绑定版本"]
     STATUS_ORDER = ["待生成", "生成中", "可下载", "已失效"]
-    ACTION_RULES = {"启动生成": "生成中", "标记可下载": "可下载", "强制失效": "已失效"}
+    ACTION_RULES = {"启动生成": "生成中", "重试生成": "可下载", "重新生成": "可下载", "标记可下载": "可下载", "强制失效": "已失效"}
     NEGATIVE_ACTIONS = []
+
+    def run_action(
+        self, entry_id: int, action: str, payload: Any | None = None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        entry = store.find(self.MODULE, entry_id)
+        if entry is None:
+            return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
+        if action in {"重试生成", "重新生成"}:
+            ok, message, updated = workflow.retry_pack_generation(entry.get("字幕包编号") or entry_id)
+            return updated, message
+        if action == "标记可下载" and not entry.get("file_content"):
+            ok, message, updated = workflow.retry_pack_generation(entry.get("字幕包编号") or entry_id)
+            if ok and updated is not None:
+                return updated, message
+        return super().run_action(entry_id, action, payload)
+
+    def retry_generate(self, pack_ref: Any):
+        return workflow.retry_pack_generation(pack_ref)
+
+    regenerate = retry_generate
+
+    def preview(self, pack_ref: Any):
+        return workflow.preview_pack(pack_ref)
+
+    def get_file_content(self, pack_ref: Any) -> str | None:
+        result = workflow.preview_pack(pack_ref)
+        return None if result is None else str(result.get("content", ""))
 
     def create_pack(
         self, pack_id: str, media_id: str, version_id: str,

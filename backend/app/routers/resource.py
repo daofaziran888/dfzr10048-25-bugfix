@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 
 from app.schemas import ActionPayload, ActionResult, EntryPayload, PageResult
 from app.services import service_for
+from app.store import store
 
 router = APIRouter(prefix="/api", tags=["业务资源"])
 
@@ -19,6 +20,18 @@ def require_service(module: str):
     if service is None:
         raise HTTPException(status_code=404, detail=f"未知业务模块：{module}")
     return service
+
+
+def resolve_entry_id(service: Any, entry_id: str) -> int | None:
+    """同时接受数字主键和各模块的业务编号（如 SPCH-0001）。"""
+    text = str(entry_id).strip()
+    if text.isdigit():
+        return int(text)
+    for row in store.rows(service.MODULE):
+        for key, value in row.items():
+            if key.endswith("编号") and str(value) == text:
+                return int(row["id"])
+    return None
 
 
 @router.get("/{module}", response_model=PageResult[dict])
@@ -74,9 +87,10 @@ def export_entries(
 
 
 @router.get("/{module}/{entry_id}", response_model=dict)
-def get_entry(module: str, entry_id: int) -> dict[str, Any]:
+def get_entry(module: str, entry_id: str) -> dict[str, Any]:
     service = require_service(module)
-    entry = service.get_entry(entry_id)
+    numeric_id = resolve_entry_id(service, entry_id)
+    entry = service.get_entry(numeric_id) if numeric_id is not None else None
     if entry is None:
         raise HTTPException(status_code=404, detail=f"{service.ENTITY} {entry_id} 不存在或已归档")
     return entry
@@ -92,7 +106,10 @@ def create_entry(module: str, payload: EntryPayload) -> ActionResult:
 
 
 @router.post("/{module}/{entry_id}/actions", response_model=ActionResult)
-def run_action(module: str, entry_id: int, payload: ActionPayload) -> ActionResult:
+def run_action(module: str, entry_id: str, payload: ActionPayload) -> ActionResult:
     service = require_service(module)
-    entry, message = service.run_action(entry_id, payload.action.strip())
+    numeric_id = resolve_entry_id(service, entry_id)
+    if numeric_id is None:
+        return ActionResult(ok=False, message=f"{service.ENTITY} {entry_id} 不存在或已归档")
+    entry, message = service.run_action(numeric_id, payload.action.strip(), payload)
     return ActionResult(ok=entry is not None, message=message, entry=entry)

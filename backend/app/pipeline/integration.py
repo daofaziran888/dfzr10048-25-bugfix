@@ -24,6 +24,7 @@ from app.pipeline.version_conflict_resolver import VersionConflictResolver, Vers
 from app.pipeline.sample_qc_gate import SampleQcGate
 from app.pipeline.subtitle_pack_assembler import SubtitlePackAssembler
 from app.pipeline.archive_reclaimer import ArchiveReclaimer
+from app.services.boundary_engine import resolve_boundaries
 
 
 class PipelineOrchestrator:
@@ -127,26 +128,40 @@ class PipelineOrchestrator:
     def link3_overlap_boundary(
         self, task_id: str, segments: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """链路3：语音段重叠→字幕对齐边界，产生唯一归属边界"""
+        """链路3：语音段重叠→字幕对齐边界，产生唯一归属边界。
+
+        内嵌插话必须完整保留，外层长段在插话两侧拆分；普通交叉重叠仍取
+        重叠窗口中点。所有输出均为正时长且首尾相接、互不重叠。
+        """
         link = "overlap-boundary"
-        boundaries: list[dict[str, Any]] = []
-        for i, seg in enumerate(segments):
-            seg["align_start"] = seg.get("start_ms", 0)
-            if i > 0:
-                prev_end = segments[i - 1].get("end_ms", 0)
-                if seg["align_start"] < prev_end:
-                    midpoint = (seg["align_start"] + prev_end) // 2
-                    segments[i - 1]["align_end"] = midpoint
-                    seg["align_start"] = midpoint
-                    boundaries.append({
-                        "segment_a": segments[i - 1].get("seg_id"),
-                        "segment_b": seg.get("seg_id"),
-                        "boundary_ms": midpoint,
-                        "rule": "midpoint",
-                    })
-            seg["align_end"] = seg.get("end_ms", seg.get("align_start", 0))
+        resolved = resolve_boundaries(segments)
+        resolved_by_id = {seg["seg_id"]: seg for seg in resolved["segments"]}
+
+        # 保持旧调用方依赖的原地写回习惯。
+        for seg in segments:
+            sid = str(seg.get("seg_id") or seg.get("segment_id") or seg.get("分段编号") or "")
+            fixed = resolved_by_id.get(sid)
+            if fixed is None:
+                continue
+            seg["align_start"] = fixed["align_start"]
+            seg["align_end"] = fixed["align_end"]
+            seg["align_ranges"] = fixed["align_ranges"]
+            seg["duration_ms"] = fixed["duration_ms"]
+
+        boundaries = resolved["boundaries"]
         self._log(link, "boundary_resolve", f"{len(boundaries)} boundaries")
-        return {"link": link, "boundaries": boundaries, "segments": segments}
+        return {
+            "link": link,
+            "task_id": task_id,
+            "boundaries": boundaries,
+            "unique_boundaries": resolved["unique_boundaries"],
+            "outputs": resolved["outputs"],
+            "resolved_segments": resolved["segments"],
+            "aligned_segments": resolved["outputs"],
+            "unique_outputs": resolved["outputs"],
+            "invalid": resolved["invalid"],
+            "segments": segments,
+        }
 
     def link4_speaker_label(
         self, segment_id: str, label: str, source: str,
